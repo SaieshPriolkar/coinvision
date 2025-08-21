@@ -16,12 +16,14 @@ interface DataPoint {
   value: number;
 }
 
-interface Props {
-  data: DataPoint[];
+type Props = {
+  title: string;
   label: string;
+  data: { date: string; value: number }[];
   yAxisLabel: string;
+  series: { id: string; label: string; yAxisLabel: string; color: string }[];
   color: string;
-}
+};
 
 export default function GenericChart({ data, label, yAxisLabel, color }: Props) {
   return (

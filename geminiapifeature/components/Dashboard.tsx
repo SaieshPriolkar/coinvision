@@ -1,6 +1,6 @@
 "use client";
-import React, { useEffect, useState, ChangeEvent } from "react";
-import { markets, MarketConfig, SeriesConfig } from "./ChartConfig";
+import React, { useEffect, useState } from "react";
+import { markets } from "./ChartConfig";
 import GenericChart from "./GenericChart";
 
 type Observation = {
@@ -21,22 +21,26 @@ export default function Dashboard() {
   const [allData, setAllData] = useState<Record<string, { date: string; value: number }[]>>({});
   const [loading, setLoading] = useState(true);
 
-  const defaultMarket = markets.find((m) => m.marketName === "Indian Markets") ?? markets[0];
-  const [selectedMarket, setSelectedMarket] = useState<MarketConfig>(defaultMarket);
-  const [selectedSeries, setSelectedSeries] = useState<SeriesConfig>(defaultMarket.series[0]);
+  const [noteInput, setNoteInput] = useState(""); // e.g. INR-200
+  const [historicalValue, setHistoricalValue] = useState<number | null>(null);
+  const [historicalYear, setHistoricalYear] = useState<number | null>(null);
+  const [selectedSeries, setSelectedSeries] = useState<any>(null);
+  const [yearsAgo, setYearsAgo] = useState(20);
+  const [compareCurrency, setCompareCurrency] = useState("USD");
 
-  const [initialInvestment, setInitialInvestment] = useState<number>(1000);
-  const [nominalRate, setNominalRate] = useState<number>(0.05); // default 5%
-  const [years, setYears] = useState<number>(5);
-
-  const [inflationRate, setInflationRate] = useState<number>(0);
-  const [nominalFinalValue, setNominalFinalValue] = useState<number | null>(null);
-  const [realFinalValue, setRealFinalValue] = useState<number | null>(null);
-
-  const [realValueSeries, setRealValueSeries] = useState<{ date: string; value: number }[]>([]);
+  // Get all available currencies from ChartConfig
+  const availableCurrencies = Array.from(
+    new Set(
+      markets
+        .flatMap((m) => m.series)
+        .flatMap((s) =>
+          s.label.match(/[A-Z]{3}/g) || []
+        )
+    )
+  );
 
   useEffect(() => {
-    async function fetchSeries(series: SeriesConfig) {
+    async function fetchSeries(series: { id: string }) {
       const res = await fetch(`/api/fred?series_id=${series.id}`);
       if (!res.ok) throw new Error(`Failed to load ${series.id}`);
       const json = await res.json();
@@ -48,7 +52,6 @@ export default function Dashboard() {
       try {
         const seriesList = markets.flatMap((m) => m.series);
         const results = await Promise.all(seriesList.map(fetchSeries));
-
         const newData: Record<string, { date: string; value: number }[]> = {};
         for (const res of results) {
           newData[res.id] = res.data;
@@ -64,50 +67,96 @@ export default function Dashboard() {
     fetchAll();
   }, []);
 
-  // Get inflation rate whenever series changes
-  useEffect(() => {
-    const data = allData[selectedSeries.id];
-    if (data && data.length > 0) {
-      const latestValue = data[data.length - 1].value;
-      setInflationRate(latestValue / 100); // convert % to decimal
+  // Handler for INR-200 input and comparison currency
+  const handleNoteInput = () => {
+    const match = noteInput.match(/^([A-Z]{3})-(\d+)$/);
+    if (!match) {
+      alert("Please enter in format CUR-amount, e.g., INR-200");
+      setSelectedSeries(null);
+      setHistoricalValue(null);
+      setHistoricalYear(null);
+      return;
     }
-  }, [selectedSeries, allData]);
-
-  // Calculate Nominal & Real Final Values + Series
-  useEffect(() => {
-    if (inflationRate !== null) {
-      const nominalValue = initialInvestment * Math.pow(1 + nominalRate, years);
-      const realValue = nominalValue / Math.pow(1 + inflationRate, years);
-      setNominalFinalValue(nominalValue);
-      setRealFinalValue(realValue);
-
-      // Build dataset for each year
-      const seriesData = Array.from({ length: years }, (_, i) => {
-        const year = i + 1;
-        const nominal = initialInvestment * Math.pow(1 + nominalRate, year);
-        const real = nominal / Math.pow(1 + inflationRate, year);
-        return { date: `${year}`, value: real };
-      });
-      setRealValueSeries(seriesData);
+    const baseCurrency = match[1];
+    const amount = parseFloat(match[2]);
+    const market = markets.find((m) => m.marketName === "Currency Markets");
+    if (!market) {
+      setSelectedSeries(null);
+      return;
     }
-  }, [initialInvestment, nominalRate, years, inflationRate]);
 
-  const handleMarketChange = (e: ChangeEvent<HTMLSelectElement>) => {
-    const marketName = e.target.value;
-    const market = markets.find((m) => m.marketName === marketName);
-    if (market) {
-      setSelectedMarket(market);
-      setSelectedSeries(market.series[0]); // reset to first series
+    // Find a series that matches the selected pair (e.g., USD/INR, USD/EUR, etc.)
+    let series =
+      market.series.find(
+        (s) =>
+          (s.label.includes(baseCurrency) && s.label.includes(compareCurrency)) ||
+          (s.label.includes(compareCurrency) && s.label.includes(baseCurrency))
+      ) ||
+      // fallback: find any series that includes the base currency
+      market.series.find((s) => s.label.includes(baseCurrency));
+
+    if (!series) {
+      alert("Currency pair not found in series.");
+      setSelectedSeries(null);
+      return;
     }
-  };
+    setSelectedSeries(series);
 
-  const handleSeriesChange = (e: ChangeEvent<HTMLSelectElement>) => {
-    const seriesId = e.target.value;
-    const series = selectedMarket.series.find((s) => s.id === seriesId);
-    if (series) setSelectedSeries(series);
+    const data = allData[series.id];
+    if (!data || data.length === 0) {
+      alert("No data available for this currency pair.");
+      setHistoricalValue(null);
+      setHistoricalYear(null);
+      return;
+    }
+
+    // Use user-specified yearsAgo (clamp to available data)
+    const idx = Math.max(0, data.length - yearsAgo * 12);
+    const oldRate = data[idx]?.value;
+    if (!oldRate) {
+      alert("Not enough historical data.");
+      setHistoricalValue(null);
+      setHistoricalYear(null);
+      return;
+    }
+
+    // Calculate value: if series is "USD to INR", and user input is INR-200, show what 200 INR was in USD
+    let value = 0;
+    if (series.label.includes(baseCurrency) && series.label.includes(compareCurrency)) {
+      // If label is "USD to INR Exchange Rate", and input is INR-200, then 200 INR / rate = USD
+      if (series.label.includes("to")) {
+        const [from, to] = series.label.split(" to ");
+        if (from.includes(baseCurrency) && to.includes(compareCurrency)) {
+          value = amount / oldRate;
+        } else {
+          value = amount * oldRate;
+        }
+      } else {
+        value = amount * oldRate;
+      }
+    } else {
+      value = amount * oldRate;
+    }
+
+    setHistoricalValue(value);
+    setHistoricalYear(new Date().getFullYear() - yearsAgo);
   };
 
   if (loading) return <p style={{ textAlign: "center", marginTop: 40 }}>Loading dashboard data...</p>;
+
+  // Prepare data for the 50-year graph
+  let chartData: { date: string; value: number }[] = [];
+  let chartLabel = "";
+  let chartYAxis = "";
+  let chartColor = "";
+  if (selectedSeries && allData[selectedSeries.id]) {
+    const data = allData[selectedSeries.id];
+    const months = 50 * 12;
+    chartData = data.slice(-months);
+    chartLabel = selectedSeries.label;
+    chartYAxis = selectedSeries.yAxisLabel;
+    chartColor = selectedSeries.color;
+  }
 
   return (
     <div className="min-h-screen w-full flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-blue-600 to-indigo-600">
@@ -115,120 +164,79 @@ export default function Dashboard() {
         Global Inflation & Market Dashboard
       </h1>
 
-      {/* Market Selector */}
-      <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <label htmlFor="market-select" style={{ marginRight: 12, fontWeight: "bold", color: "white" }}>
-          Select Market:
-        </label>
+      {/* Input for CUR-amount, years ago, and comparison currency */}
+      <div style={{ textAlign: "center", marginBottom: 24, color: "white" }}>
+        <h3>Check Historical Value</h3>
+        <input
+          type="text"
+          value={noteInput}
+          onChange={(e) => setNoteInput(e.target.value)}
+          placeholder="INR-200"
+          style={{ padding: 4, marginRight: 8 }}
+        />
+        <input
+          type="number"
+          min={1}
+          max={80}
+          value={yearsAgo}
+          onChange={(e) => setYearsAgo(Number(e.target.value))}
+          placeholder="Years ago"
+          style={{ padding: 4, width: 80, marginRight: 8 }}
+        />
         <select
-          id="market-select"
-          value={selectedMarket.marketName}
-          onChange={handleMarketChange}
-          style={{ padding: "6px 12px", borderRadius: 4, background: "black", color: "white" }}
+          value={compareCurrency}
+          onChange={(e) => setCompareCurrency(e.target.value)}
+          style={{ padding: 4, marginRight: 8, borderRadius: 4 }}
         >
-          {markets.map((market) => (
-            <option key={market.marketName} value={market.marketName}>
-              {market.marketName}
+          {availableCurrencies.map((cur) => (
+            <option key={cur} value={cur}>
+              {cur}
             </option>
           ))}
         </select>
-      </div>
-
-      {/* Series Selector */}
-      <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <label htmlFor="series-select" style={{ marginRight: 12, fontWeight: "bold", color: "white" }}>
-          Select Series:
-        </label>
-        <select
-          id="series-select"
-          value={selectedSeries.id}
-          onChange={handleSeriesChange}
-          style={{ padding: "6px 12px", borderRadius: 4, background: "black", color: "white" }}
-        >
-          {selectedMarket.series.map((series) => (
-            <option key={series.id} value={series.id}>
-              {series.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Investment Calculator */}
-      <div style={{ textAlign: "center", marginBottom: 40, color: "white" }}>
-        <h3>Investment Calculator</h3>
-        <div style={{ marginBottom: 8 }}>
-          Initial Investment:{" "}
-          <input
-            type="number"
-            value={initialInvestment}
-            onChange={(e) => setInitialInvestment(Number(e.target.value))}
-            style={{ padding: 4, marginLeft: 8 }}
-          />
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          Nominal Rate (%):{" "}
-          <input
-            type="number"
-            value={nominalRate * 100}
-            onChange={(e) => setNominalRate(Number(e.target.value) / 100)}
-            style={{ padding: 4, marginLeft: 8 }}
-          />
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          Years:{" "}
-          <input
-            type="number"
-            value={years}
-            onChange={(e) => setYears(Number(e.target.value))}
-            style={{ padding: 4, marginLeft: 8 }}
-          />
-        </div>
-        <p>📊 Present Inflation Rate: {(inflationRate * 100).toFixed(2)}%</p>
-        {nominalFinalValue !== null && realFinalValue !== null && (
-          <>
-            <p>💰 Nominal Final Value: {nominalFinalValue.toFixed(2)}</p>
-            <p>🏦 Real Final Value (adjusted for inflation): {realFinalValue.toFixed(2)}</p>
-          </>
-        )}
-        {/* New Real Final Value Chart */}
-          {realValueSeries.length > 0 && (
-            <GenericChart
-              data={realValueSeries}
-              label="Real Final Value Over Time"
-              yAxisLabel="Value"
-              color="#FFD700"
-            />
-          )}
-      </div>
-
-      {/* Charts */}
-      <section style={{ marginBottom: 48 }}>
-        <h2 style={{ borderBottom: "2px solid #ccc", paddingBottom: 6, marginBottom: 20, color: "white" }}>
-          {selectedMarket.marketName}
-        </h2>
-        <div
+        <button
+          onClick={handleNoteInput}
           style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))",
-            gap: 24,
+            padding: "4px 12px",
+            borderRadius: 4,
+            background: "#FFD700",
+            color: "black",
           }}
         >
-          {selectedMarket.series.map((series) => {
-            const data = allData[series.id] ?? [];
-            return (
-              <GenericChart
-                key={series.id}
-                data={data}
-                label={series.label}
-                yAxisLabel={series.yAxisLabel}
-                color={series.color}
-              />
-            );
-          })}
+          Show Value
+        </button>
+        {historicalValue !== null && historicalYear !== null && (
+          <div style={{ marginTop: 12 }}>
+            <strong>
+              {noteInput} ≈ {historicalValue.toFixed(2)} {compareCurrency} in {historicalYear}
+            </strong>
+          </div>
+        )}
+      </div>
 
-          
+      {/* 50 Years Historical Graph */}
+      {selectedSeries && chartData.length > 0 && (
+        <div style={{ marginBottom: 48 }}>
+          <h2 style={{ color: "white", marginBottom: 12 }}>
+            {chartLabel} (Last 50 Years)
+          </h2>
+          <GenericChart
+            data={chartData}
+            label={chartLabel}
+            yAxisLabel={chartYAxis}
+            color={chartColor}
+            title={chartLabel}
+            series={[
+              {
+                id: selectedSeries.id,
+                label: chartLabel,
+                yAxisLabel: chartYAxis,
+                color: chartColor,
+              },
+            ]}
+          />
         </div>
-      </section>
+      )}
     </div>
   );
 }
